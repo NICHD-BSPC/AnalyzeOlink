@@ -14,14 +14,15 @@
 #         _elisa scripts depend on elisa.Rmd
 snakemake:
   RMD_FILES:
-    - differential_expression
-    - assumptions_pea
-    - annotations_pea
-    - sensitivity_pea
-    - covariates_pea
-    - correlations_pea
-    # - elisa              # Enable if analyzing ELISA data
-    # - assumptions_elisa  # Enable if analyzing ELISA data
+    - differential_expression # QC, stats tables, volcano plots, etc.
+    - assumptions_pea         # Parametric stats assumptions testing
+    - annotations_pea         # Human Protein Atlas IHC annotations
+    - sensitivity_pea         # Leave-one-out sensitivity analysis
+    - covariates_pea          # Non-parametric covariate effect assessement
+    - correlations_pea        # Non-parametric metadata correlations testing
+    - elisa                   # differential_expression equivalent analysis for orthogonal validation data
+    - assumptions_elisa       # Parametric stats assumptions testing on ELISA data
+    # - functional_enrichment_pea # FE analysis on Olink data; not currently supported
 
 # ------------------------------------------------------------------------------
 # 2. INPUT DATA PATHS
