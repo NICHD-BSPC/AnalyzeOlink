@@ -1,0 +1,30 @@
+# Conda environemnt
+environment/env
+# Hidden snakemake directories
+snakemake/.snakemake
+# Data
+data/ELISA/
+data/PEA/
+# Output HTML reports
+*.html
+# Output directories
+output/
+# Rmarkdown files
+*_cache/
+*_files/
+# Intermediate files
+*.Rds
+# R project files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+# RStudio files
+*.Rproj
+# Package check directory
+AnalyzeOlink.Rcheck/
+# Devtools build artifacts
+*.tar.gz
+# Knitr intermediate files
+*.utf8.md
+*.knit.md

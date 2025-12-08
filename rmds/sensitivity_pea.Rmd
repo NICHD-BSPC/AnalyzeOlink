@@ -1,0 +1,303 @@
+---
+title: "ANOVA Sensitivity Analysis"
+author: "NICHD Bioinformatics and Scientific Programming Core"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+params:
+  npx_data:        NULL
+  sampletable:     NULL
+  data:            NULL
+---
+
+# Analysis Overview
+
+This report measures how sensitive your main disease vs control inference is to:
+
+1. **Individual samples** (leave‑one‑out sensitivity)
+2. **Model terms / covariates** (term‑removal sensitivity)
+
+With the shipped **test data**, the main contrast is **Group (disease vs control)**,
+adjusting for:
+
+- `Cov1` (continuous; mean‑centered to `Cov1_c` for interactions)
+- `Cov2` (categorical)
+
+If you are running your own data, edit the **USER SETTINGS** section below to
+match your contrast name, any leave‑one‑out samples you care about, and the
+alternative model formulas you want to compare.
+
+```{r AnaylzeOlink, eval=FALSE, results='hide'}
+# When running interactively, and not from the Snakefile,
+# load the AnalyzeOlink R package, which is stored locally.
+# This package has many custom functions used throughout this document.
+devtools::document('../../AnalyzeOlink')
+devtools::load_all('../../AnalyzeOlink')
+```
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(AnalyzeOlink)
+
+# Use sum-to-zero (effect) coding so the intercept represents the grand mean,
+# each coefficient is a deviation from that mean, and Type-III hypotheses
+# are easier to interpret.
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# Read config
+config <- yaml::read_yaml("../config/config.yaml")
+
+# Set up cache invalidation
+knitr::opts_chunk$set(
+  warning     = FALSE,
+  message     = FALSE,
+  lazy.load   = FALSE,
+  cache.lazy  = FALSE,
+  cache.extra = list(
+    file.info("../config/config.yaml")$mtime,
+    file.info(config$input_data_paths$PEA)$mtime,
+    file.info(config$sampletable_paths$PEA)$mtime,
+    file.info(config$output_data_paths$PEA)$mtime
+  )
+)
+
+# Use Snakemake inputs if running via Snakefile
+# otherwise, fall back to config contents
+if (!is.null(params$npx_data)) {
+  config$input_data_paths$PEA <- params$npx_data
+}
+if (!is.null(params$sampletable)) {
+  config$sampletable_paths$PEA <- params$sampletable
+}
+if (!is.null(params$data)) {
+  config$output_data_paths$PEA <- params$data
+}
+```
+
+```{r fetch-data-from-olinkanalyze, results='asis', eval=TRUE, cache=TRUE}
+olink_analyze_data <- readRDS(config$output_data_paths$PEA)
+se_list            <- olink_analyze_data$se_list
+contrast_list      <- olink_analyze_data$contrast_list
+```
+
+# Sensitivity Configuration (USER‑CONFIGURABLE)
+
+Edit only what you need.
+
+```{r sensitivity-user-settings, cache=FALSE}
+# -------------------------------------------------------------------------
+# USER SETTINGS
+# -------------------------------------------------------------------------
+
+# 1) Choose your *baseline* contrast to stress‑test.
+#    IMPORTANT: sensitivity() requires a contrast that produces $anova tables
+#    (i.e., run_tests has "anova" or "lmer"). Do NOT pick ttest/wilcox contrasts.
+baseline_contrast <- "disease_vs_control_anova"
+
+# 2) Leave‑one‑out samples to test.
+#    With the shipped test data these are deterministic "misbehaving" examples.
+leave_one_out_samples <- c("A2", "A3", "A4")
+
+# 3) Which model effects to plot in sensitivity scatterplots.
+#    These are the afex/emmeans term labels expected in res_list[[ctr]]$anova.
+effects_full <- c("Group", "Cov1_c", "Group:Cov1_c", "Cov2")
+
+# 4) Alternative formulas for term‑removal sensitivity.
+#    Each entry creates a new contrast named "<baseline>_<tag>".
+#    Update formulas, observed, and more_factors to match your own model.
+term_sensitivity_specs <- list(
+  # Remove interaction term Group:Cov1_c
+  no_int = list(
+    formula      = "NPX ~ Group + Cov1_c + Cov2 + Error(SampleID)",
+    observed     = c("Cov1_c", "Cov2"),
+    more_factors = "Cov2"
+  ),
+  # Remove Cov1 (and thus interaction)
+  no_cov1 = list(
+    formula      = "NPX ~ Group + Cov2 + Error(SampleID)",
+    observed     = c("Cov2"),
+    more_factors = "Cov2"
+  ),
+  # Remove Cov2
+  no_cov2 = list(
+    formula      = "NPX ~ Group * Cov1_c + Error(SampleID)",
+    observed     = c("Cov1_c"),
+    more_factors = NULL
+  ),
+  # Group main effect only
+  no_terms = list(
+    formula      = "NPX ~ Group + Error(SampleID)",
+    observed     = NULL,
+    more_factors = NULL
+  )
+)
+```
+
+```{r setup-sensitivity-contrasts, cache=FALSE}
+# -------------------------------------------------------------------------
+# Build sensitivity contrasts from USER SETTINGS
+# -------------------------------------------------------------------------
+
+stopifnot(baseline_contrast %in% names(contrast_list))
+
+# Start from the already‑validated contrasts from differential_expression.Rmd
+contrast_list_sens <- contrast_list
+
+# Pull baseline params and baseline SE object
+base_params  <- contrast_list[[baseline_contrast]]
+base_se_name <- base_params$se_object_name
+stopifnot(base_se_name %in% names(se_list))
+
+base_se <- se_list[[base_se_name]]
+
+# ---- SAMPLE‑LEVEL LEAVE‑ONE‑OUT ----
+for (s in leave_one_out_samples) {
+  new_se_name <- paste0(baseline_contrast, "_no_", s)
+
+  se_list[[new_se_name]] <- subset_se(
+    base_se,
+    column         = "SampleID",
+    pattern        = s,
+    keep_or_remove = "remove"
+  )
+
+  base_params$name           <- paste0(baseline_contrast, "_no_", s)
+  base_params$se_object_name <- new_se_name
+
+  contrast_list_sens[[base_params$name]] <- validate_parameters(base_params, se_list, sensitivity = TRUE)
+}
+
+# ---- TERM‑REMOVAL SENSITIVITY ----
+for (tag in names(term_sensitivity_specs)) {
+  specs  <- term_sensitivity_specs[[tag]]
+
+  base_params$name         <- paste0(baseline_contrast, "_", tag)
+  base_params$formula      <- specs$formula
+  base_params$observed     <- specs$observed
+  base_params$more_factors <- specs$more_factors
+
+  contrast_list_sens[[base_params$name]] <- validate_parameters(base_params, se_list, sensitivity = TRUE)
+}
+```
+
+```{r test-contrasts, eval=TRUE, cache=TRUE, results='asis', dependson='fetch-data-from-olinkanalyze'}
+res_list <- if (isTRUE(config$parallel)) {
+  parallel_test_runner(contrast_list_sens, se_list, config)
+} else {
+  run_tests(contrast_list_sens, se_list, config)
+}
+```
+
+# Sensitivity Analyses
+
+*How much does a single sample or term affect each of the terms in our model?*
+
+The plots below compare effect sizes (partial η² / `pes`) **with vs without**
+a sample or term. Proteins far from the dashed identity line are those whose
+apparent effects change most when the element is removed.
+
+*What is partial η² (eta²) and why use it here?*
+
+- **Partial η² (pes)** is the proportion of variance in NPX uniquely attributable
+  to a given term after accounting for all other terms.
+- It is bounded (0–1) and comparable across terms, making it ideal for multi‑panel
+  sensitivity plots.
+
+## Violations of normality, misbehaving samples in baseline contrast {.tabset}
+
+```{r sensitivity-samples-reference, results='asis', eval=TRUE, cache=FALSE, fig.height = 7, fig.width = 10}
+mdcat("**Reference Comparison**")
+sensitivity(
+  res_list,
+  out_dir   = config$output_paths$sensitivity_pea$plots,
+  contrasts = c(baseline_contrast, baseline_contrast),
+  effects   = effects_full,
+  element   = "reference comparison",
+  label     = config$label_on_plots$disease_vs_control
+)
+```
+
+```{r sensitivity-samples, results='asis', eval=TRUE, cache=FALSE, fig.height = 7, fig.width = 10}
+mdcat("Leave‑one‑out sensitivity for baseline disease vs control contrast")
+
+for (s in leave_one_out_samples) {
+  mdcat(paste0("#### Sample ", s))
+
+  sensitivity(
+    res_list,
+    out_dir   = config$output_paths$sensitivity_pea$plots,
+    contrasts = c(paste0(baseline_contrast, "_no_", s), baseline_contrast),
+    effects   = effects_full,
+    element   = paste("sample", s),
+    label     = config$label_on_plots$disease_vs_control
+  )
+}
+```
+
+## Model terms {.tabset}
+
+*How does each covariate term affect the baseline model?*
+
+**Baseline formula (test data):**
+`NPX ~ Group * Cov1_c + Cov2 + Error(SampleID)`
+
+```{r sensitivity-terms-reference, results='asis', eval=TRUE, cache=FALSE, fig.height = 7, fig.width = 10}
+mdcat("**Reference Comparison**")
+sensitivity(
+  res_list,
+  out_dir   = config$output_paths$sensitivity_pea$plots,
+  contrasts = c(baseline_contrast, baseline_contrast),
+  effects   = effects_full,
+  element   = "reference comparison",
+  type      = "anova",
+  reference = TRUE,
+  label     = config$label_on_plots$disease_vs_control
+)
+```
+
+```{r sensitivity-terms, results='asis', eval=TRUE, cache=FALSE, dependson='test-contrasts', fig.height = 7, fig.width = 10}
+# Loop over term specs to avoid repeating code
+for (tag in names(term_sensitivity_specs)) {
+
+  pretty_tag <- switch(
+    tag,
+    no_int   = "Remove interaction term Group:Cov1",
+    no_cov1  = "Remove term Cov1 (and interaction)",
+    no_cov2  = "Remove term Cov2",
+    no_terms = "Remove all covariates",
+    tag
+  )
+
+  mdcat(paste0("##### ", pretty_tag))
+
+  # Effects to display can be narrower for some comparisons
+  effects_to_plot <- switch(
+    tag,
+    no_int   = c("Group", "Cov2"),
+    no_cov1  = c("Group", "Cov2"),
+    no_cov2  = c("Group", "Cov1_c", "Group:Cov1_c"),
+    no_terms = c("Group"),
+    effects_full
+  )
+
+  sensitivity(
+    res_list,
+    out_dir   = config$output_paths$sensitivity_pea$plots,
+    contrasts = c(paste0(baseline_contrast, "_", tag), baseline_contrast),
+    effects   = effects_to_plot,
+    element   = pretty_tag,
+    type      = "anova",
+    label     = config$label_on_plots$disease_vs_control
+  )
+}
+```
+
+## Session Information
+
+```{r sessioninfo, eval=TRUE}
+sessionInfo()
+```

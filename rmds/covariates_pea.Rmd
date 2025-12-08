@@ -1,0 +1,172 @@
+---
+title: "Metadata Covariate Analysis"
+author: "NICHD Bioinformatics and Scientific Programming Core"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+params:
+  npx_data:        NULL
+  sampletable:     NULL
+  data:            NULL
+---
+
+# Analysis Overview
+
+This report assesses whether key **sample‑level covariates** differ across the
+contrast arms tested in the primary Olink analysis. This analysis is designed
+to be compatible with non-parametric frameworks applied in differential_expression.Rmd
+for which we do not have p-values associated with each covariate in the model.
+
+With the shipped **test data**, these covariates are:
+
+- `Cov1` (continuous; analogous to Age)
+- `Cov2` (categorical; analogous to Sex)
+
+With real user data, you can point this report at any covariates in your sample
+table by editing the **USER SETTINGS** block below.
+
+This analysis contains:
+
+1. **Covariate Data Preparation**
+
+2. **Covariate Balance Tests**
+
+3. **Covariate Visualizations & Tables**
+
+```{r AnaylzeOlink, eval=FALSE, results='hide'}
+# When running interactively, and not from the Snakefile,
+# load the AnalyzeOlink R package, which is stored locally.
+# This package has many custom functions used throughout this document.
+devtools::document('../../AnalyzeOlink')
+devtools::load_all('../../AnalyzeOlink')
+```
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(AnalyzeOlink)
+
+# Read config
+config <- yaml::read_yaml("../config/config.yaml")
+
+# Set up cache invalidation
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache.extra = list(
+    file.info("../config/config.yaml")$mtime,
+    file.info(config$input_data_paths$PEA)$mtime,
+    file.info(config$sampletable_paths$PEA)$mtime,
+    file.info(config$output_data_paths$PEA)$mtime
+  )
+)
+
+# Use Snakemake inputs if running via Snakefile
+# otherwise, fall back to config contents
+if (!is.null(params$npx_data)) {
+  config$input_data_paths$PEA <- params$npx_data
+}
+if (!is.null(params$sampletable)) {
+  config$sampletable_paths$PEA <- params$sampletable
+}
+if (!is.null(params$data)) {
+  config$output_data_paths$PEA <- params$data
+}
+```
+
+```{r fetch-data-from-olinkanalyze, results='asis', eval=TRUE, cache=TRUE}
+olink_analyze_data <- readRDS(config$output_data_paths$PEA)
+se_list            <- olink_analyze_data$se_list
+```
+
+# Covariate Settings (USER‑CONFIGURABLE)
+
+Most users only need to edit this block.
+
+```{r covariates-user-settings, cache=TRUE, dependson='fetch-data-from-olinkanalyze'}
+# -------------------------------------------------------------------------
+# USER SETTINGS
+# -------------------------------------------------------------------------
+
+# 1) Define which contrasts and which SE objects you want to assess
+#    For shipped test data, we only have disease vs control.
+contrast_specs <- list(
+  disease_vs_control_anova = list(
+    se_object_name  = "Disease",  # SE name inside se_list from differential_expression.Rds
+    sampletable_col = "Group",    # grouping column in colData
+    g1 = "disease",
+    g2 = "control",
+    columns = c("SampleID", "Group", "Cov1", "Cov2")  # columns to keep for covariate testing
+  )
+  # If you later want more contrasts, add more entries here:
+  # treatment_1_vs_disease = list(se_object_name="Treatment_1", sampletable_col="Group", g1="treatment_1", g2="disease", columns=...)
+)
+
+# 2) Build the per-contrast colData list
+coldata_list <- prepare_covariate_coldata(se_list, contrast_specs)
+
+# Column names in your sample table / colData
+cov_continuous <- "Cov1"   # continuous covariate (Wilcoxon test)
+cov_factor     <- "Cov2"   # categorical covariate (Chi-square test)
+
+# Sanity checks
+stopifnot(
+  cov_continuous %in% colnames(coldata_list[[1]]$df),
+  cov_factor %in% colnames(coldata_list[[1]]$df)
+)
+
+# Define which test to run for each covariate
+# The currently supported tests are "wilcox" and "chisq"
+covariate_tests <- list(
+  Cov1 = "wilcox",
+  Cov2 = "chisq"
+)
+```
+
+```{r run-tests, cache=TRUE, dependson='covariates-user-settings'}
+cov_list <- test_for_covariates(coldata_list, covariate_tests, config$alpha)
+```
+
+# Covariate Analyses {.tabset}
+
+For each covariate, we:
+1. Test whether the covariate distribution differs between contrast arms.
+2. Save a per‑covariate Excel summary.
+3. Plot covariate distributions per contrast.
+
+```{r run-covariates-loop, results='asis', cache=FALSE, dependson='run-tests'}
+# Loop once over all configured covariates instead of repeating code blocks
+for (cov_nm in names(covariate_tests)) {
+  test_nm <- covariate_tests[[cov_nm]]
+
+  # Write out this covariate's results
+  xlsx_path <- save_covariates(
+    cov_list        = cov_list,
+    covariate_tests = setNames(list(test_nm), cov_nm),
+    out_dir         = config$output_paths$covariates_pea$results,
+    file_name       = paste0(cov_nm, "_covariate.xlsx")
+  )
+
+  # Print plots + DT tables to the report
+  mdcat(paste0("## ", cov_nm, " {.tabset}\n\n"))
+
+  print_covariate_analysis(
+    coldata_list  = coldata_list,
+    cov_list      = cov_list,
+    config        = config,
+    xlsx_path     = xlsx_path,
+    plots_dir     = config$output_paths$covariates_pea$plots,
+    covariate     = cov_nm,
+    plot_fn       = plot_covariate_dist
+  )
+}
+```
+
+## Session Information
+
+```{r sessioninfo, echo=FALSE}
+sessionInfo()
+```

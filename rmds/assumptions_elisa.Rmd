@@ -1,0 +1,241 @@
+---
+title: "Parametric Assumption Violation Analysis of ELISA Data"
+author: "NICHD Bioinformatics and Scientific Programming Core"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+params:
+  ELISA_data:       NULL
+  sampletable:      NULL
+  data:             NULL
+---
+
+# Analysis Overview
+
+This report evaluates model assumptions for the ELISA differential abundance
+analysis. We assess residual normality and equality of group variances for each
+protein using Shapiro–Wilk (SW), Anderson–Darling (AD), and two‑sample F‑tests.
+QQ plots and residual outlier summaries help diagnose the drivers of any
+violations.
+
+Key points (typical pattern in ELISA/PEA):
+- Residual non‑normality is usually driven by a few heavy‑tailed samples rather
+  than global departures.
+- Unequal variances affect only a small subset of proteins.
+
+```{r AnaylzeOlink, eval=FALSE, results='hide'}
+# When running interactively, and not from the Snakefile,
+# load the AnalyzeOlink R package, which is stored locally.
+# This package has many custom functions used throughout this document.
+devtools::document('../../AnalyzeOlink')
+devtools::load_all('../../AnalyzeOlink')
+```
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(AnalyzeOlink)
+
+# Read config
+config <- yaml::read_yaml("../config/config.yaml")
+
+# Set up cache invalidation
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache.extra = list(
+    file.info("../config/config.yaml")$mtime,
+    file.info(config$input_data_paths$ELISA)$mtime,
+    file.info(config$sampletable_paths$ELISA)$mtime,
+    file.info(config$output_data_paths$ELISA)$mtime
+  )
+)
+
+# Use Snakemake inputs if running via Snakefile; otherwise fall back to config
+if (!is.null(params$ELISA_data)) {
+  config$input_data_paths$ELISA <- params$ELISA_data
+}
+if (!is.null(params$sampletable)) {
+  config$sampletable_paths$ELISA <- params$sampletable
+}
+if (!is.null(params$data)) {
+  config$output_data_paths$ELISA <- params$data
+}
+```
+
+```{r user-settings, include=FALSE}
+# -------------------------------------------------------------------------
+# USER SETTINGS
+# -------------------------------------------------------------------------
+# This assumptions report is designed to work with the shipped test data
+# AND with real user data once they configure their ELISA analysis.
+#
+# 1) Which contrasts should be checked?
+#    - Test data supports only disease_vs_control.
+contrasts_to_check <- c("disease_vs_control_anova")
+
+# 2) Outlier frequency settings, Tukey IQR rule on residuals to define outliers
+#    We count residual outliers only among proteins with SW p in this range.
+pval_bin <- c(0, 0.1)
+k        <- 1.5  # Tukey fence multiplier for outlier detection
+
+# 3) How many QQ plots to show
+num_proteins <- 10
+num_samples  <- 10
+```
+
+```{r fetch-data-from-olinkanalyze, results='asis', eval=TRUE, cache=TRUE}
+olink_analyze_data <- readRDS(config$output_data_paths$ELISA)
+se_list            <- olink_analyze_data$se_list
+res_list           <- olink_analyze_data$res_list
+```
+
+```{r subset-res-list, eval=TRUE, cache=TRUE, dependson='fetch-data-from-olinkanalyze'}
+# Keep statistics for the primary effects only (e.g., Group for disease_vs_control)
+res_list_subset_1_effect <- keep_primary_effects(res_list)
+
+# Restrict to contrasts requested above
+res_list_subset_1_effect <- res_list_subset_1_effect[names(res_list_subset_1_effect) %in% contrasts_to_check]
+```
+
+## Assess Normality
+
+### Raw ELISA Histogram {.tabset}
+
+Residuals of a well‑specified model should be approximately normal; the raw
+measurements need not be. Deviations in raw values are common in proteomics/
+ELISA, but what matters is the residual behavior.
+
+```{r npx-histogram, results='asis', eval=TRUE, cache=FALSE, dependson='subset-res-list'}
+npx_hist(
+  res_list_subset_1_effect,
+  se_list,
+  config$output_paths$assumptions_elisa$plots,
+  breaks = 100
+)
+```
+
+### Residuals: Shapiro–Wilk p‑value histogram {.tabset}
+
+**What SW tests:** for each protein, SW asks whether residuals are consistent
+with a normal distribution. Low p‑values indicate departures from normality.
+
+**Typical interpretation:** over‑representation of low SW p‑values is often driven
+by heavy tails in a small number of samples, not global misspecification.
+
+```{r sw-histogram, results='asis', eval=TRUE, cache=FALSE, dependson='subset-res-list'}
+normal_summary_table <- norm_hist(
+  res_list_subset_1_effect,
+  test   = "SW",
+  alpha  = config$alpha,
+  outdir = config$output_paths$assumptions_elisa$plots,
+  breaks = 20
+)
+```
+
+### Residuals: Anderson–Darling p‑value histogram {.tabset}
+
+Anderson–Darling (AD) is another way to test for abnormal residual error distributions.
+
+```{r ad-histogram, results='asis', eval=TRUE, cache=FALSE, dependson='subset-res-list'}
+norm_hist(
+  res_list_subset_1_effect,
+  test   = "AD",
+  alpha  = config$alpha,
+  outdir = config$output_paths$assumptions_elisa$plots,
+  breaks = 20
+)
+```
+
+### Variance homogeneity: F‑test p‑value histogram {.tabset}
+
+Two‑sample F‑tests (per protein) compare group variances. Significant values
+flag heteroscedasticity. If only a minority of proteins violate this
+assumption, OLS (our ANOVA framework) remains broadly reasonable and conservative.
+
+```{r ft-histogram, results='asis', eval=TRUE, cache=FALSE, dependson='subset-res-list'}
+norm_hist(
+  res_list_subset_1_effect,
+  test   = "FT",
+  alpha  = config$alpha,
+  outdir = config$output_paths$assumptions_elisa$plots,
+  breaks = 20
+)
+```
+
+```{r qq-outliers-list, results='asis', eval=TRUE, cache=TRUE, dependson='subset-res-list'}
+# Get per‑contrast, per‑protein outlier IDs (Tukey IQR rule on residuals)
+outlier_list <- write_outlier_frequency_table(
+  res_list_subset_1_effect,
+  outdir     = config$output_paths$assumptions_elisa$results,
+  pval_bin   = pval_bin,
+  k          = k,
+  print_plot = FALSE
+)
+```
+
+### Residuals: QQ Plots (per‑protein) {.tabset}
+
+QQ plots show which proteins deviate from normality and whether departures are
+isolated to a few heavy‑tailed samples.
+
+```{r qq-residuals-proteins, results='asis', eval=TRUE, cache=TRUE, dependson='qq-outliers-list'}
+plot_qq(
+  res_list_subset_1_effect,
+  outdir       = config$output_paths$assumptions_elisa$plots,
+  label_map    = outlier_list,
+  num_proteins = num_proteins,
+  type         = "protein"
+)
+```
+
+### Residuals: Outlier Frequencies {.tabset}
+
+We flag a sample as a residual outlier if it falls outside Tukey’s fences:
+
+- lower = Q1 − 1.5 × IQR
+- upper = Q3 + 1.5 × IQR
+
+Counting outlier frequency per sample helps explain SW/AD histograms.
+
+```{r qq-outliers-plot, results='asis', eval=TRUE, cache=TRUE, dependson='subset-res-list'}
+freq_tbl_list <- write_outlier_frequency_table(
+  res_list_subset_1_effect,
+  outdir     = config$output_paths$assumptions_elisa$results,
+  pval_bin   = pval_bin,
+  k          = k,
+  print_plot = TRUE
+)
+```
+
+### Residuals: QQ Plots (per‑sample) {.tabset}
+
+We inspect QQ plots for the 10 most frequently flagged samples to determine
+whether deviations are systematic or protein‑specific.
+
+```{r qq-residuals-samples, results='asis', eval=TRUE, cache=TRUE, dependson='qq-outliers-plot'}
+plot_qq(
+  res_list_subset_1_effect,
+  outdir       = config$output_paths$assumptions_elisa$plots,
+  label_map    = outlier_list,
+  num_samples  = num_samples,
+  num_proteins = num_proteins,
+  type         = "sample",
+  freq_table   = freq_tbl_list
+)
+```
+
+```{r record-standard-assumption-violations, eval=TRUE, cache=TRUE, dependson='subset-res-list'}
+# Record Shapiro–Wilk and F‑test multiple‑testing results per contrast
+sw_list <- record_standard_assumption_violations(res_list_subset_1_effect, "SW_padj")
+ft_list <- record_standard_assumption_violations(res_list_subset_1_effect, "FT_padj")
+```
+
+## Session Information
+
+```{r sessioninfo, eval=TRUE}
+sessionInfo()
+```

@@ -1,0 +1,159 @@
+---
+title: "Olink® PEA Functional Enrichment Analysis"
+author: "NICHD Bioinformatics and Scientific Programming Core"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+params:
+  npx_data:        NULL
+  sampletable:     NULL
+  data:            NULL
+---
+
+# Analysis Overview
+
+This report performs functional enrichment analyses (ORA and/or GSEA, depending
+on your config) on the **primary effects** from your Olink PEA differential
+abundance results.
+
+With shipped **test data**, there is only one primary contrast:
+
+- `disease_vs_control` (Group: disease vs control, adjusted for Cov1 and Cov2)
+
+If you are running real data with additional contrasts, update the
+**USER SETTINGS** section to choose which contrasts to enrich.
+
+```{r AnaylzeOlink, eval=FALSE, results='hide'}
+# When running interactively, and not from the Snakefile,
+# load the AnalyzeOlink R package, which is stored locally.
+# This package has many custom functions used throughout this document.
+devtools::document('../../AnalyzeOlink')
+devtools::load_all('../../AnalyzeOlink')
+```
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(AnalyzeOlink)
+
+# Read config
+config <- yaml::read_yaml("../config/config.yaml")
+
+# Set up cache invalidation
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache.extra = list(
+    file.info("../config/config.yaml")$mtime,
+    file.info(config$input_data_paths$PEA)$mtime,
+    file.info(config$sampletable_paths$PEA)$mtime,
+    file.info(config$output_data_paths$PEA)$mtime
+  )
+)
+
+# Use Snakemake inputs if running via Snakefile
+# otherwise, fall back to config contents
+if (!is.null(params$npx_data)) {
+  config$input_data_paths$PEA <- params$npx_data
+}
+if (!is.null(params$sampletable)) {
+  config$sampletable_paths$PEA <- params$sampletable
+}
+if (!is.null(params$data)) {
+  config$output_data_paths$PEA <- params$data
+}
+```
+
+```{r fetch-data-from-olinkanalyze, results='asis', eval=TRUE, cache=TRUE}
+olink_analyze_data <- readRDS(config$output_data_paths$PEA)
+se_list            <- olink_analyze_data$se_list
+res_list           <- olink_analyze_data$res_list
+```
+
+```{r subset-res-list-primary-effects, eval=TRUE, cache=TRUE, dependson='fetch-data-from-olinkanalyze'}
+# Keep statistics for primary effects only (Group for disease_vs_control)
+res_list_subset_1_effect <- keep_primary_effects(res_list)
+```
+
+# Enrichment Settings (USER-CONFIGURABLE)
+
+Most users only need to edit this block.
+
+```{r enrichment-user-settings, cache=FALSE}
+# -------------------------------------------------------------------------
+# USER SETTINGS
+# -------------------------------------------------------------------------
+
+# 1) Which contrasts should be enriched?
+#    - With test data: only disease_vs_control exists.
+#    - With real data: pick any subset you care about.
+contrasts_to_enrich <- names(res_list_subset_1_effect)
+
+# 2) OPTIONAL: override enrichment methods here if you want to temporarily
+#    change what is in config$enrichment without editing the YAML.
+#    Example: method_override <- c("ORA", "GSEA")
+method_override <- NULL
+
+# -------------------------------------------------------------------------
+# Sanity checks
+# -------------------------------------------------------------------------
+bad_ctr <- setdiff(contrasts_to_enrich, names(res_list_subset_1_effect))
+if (length(bad_ctr) > 0) {
+  stop("Unknown contrasts in contrasts_to_enrich: ", paste(bad_ctr, collapse = ", "))
+}
+
+# Subset to chosen contrasts
+res_list_subset_1_effect <- res_list_subset_1_effect[contrasts_to_enrich]
+
+# Temporarily override config methods if requested
+if (!is.null(method_override)) {
+  config$enrichment$methods <- method_override
+}
+```
+
+```{r functional-enrichment, eval=TRUE, cache=TRUE, dependson=c('subset-res-list-primary-effects','enrichment-user-settings')}
+# Perform functional enrichment analysis on all chosen contrasts
+enrich_list <- if (isTRUE(config$parallel)) {
+  parallel_enrich(res_list_subset_1_effect, config)
+} else {
+  enrich(res_list_subset_1_effect, config)
+}
+```
+
+## Functional Enrichment Results {.tabset}
+
+Enrichment tables list gene set names ranked by representation metrics. The
+following abbreviated prefixes in the Description column denote the source
+database or publication:
+
+- **GOMF**: "Gene Ontology - Molecular Function"
+- **GOBP**: "Gene Ontology - Biological Process"
+- **GOCC**: "Gene Ontology - Cellular Component"
+- **Reactome**: curated pathway database
+- **KEGG**: Kyoto Encyclopedia of Genes and Genomes
+- **LIU**, **CHEN**, **RUTELLA**, etc.: custom gene sets from published studies
+
+```{r functional-enrichment-results, results='asis', eval=TRUE, cache=FALSE, dependson='functional-enrichment'}
+# NOTE: rendering from cache will cause DT tables to disappear
+print_enrichment_results(enrich_list, config)
+```
+
+## Dotplots {.tabset}
+
+ORA dotplots show top enriched gene sets by RichFactor (x) and adjusted p-value
+(color). Point size indicates overlapping gene count.
+
+GSEA dotplots show top gene sets by NES (x). Color and size are as above.
+
+```{r dotplots, results='asis', eval=TRUE, cache=FALSE, dependson='functional-enrichment'}
+dotplot(enrich_list, config)
+```
+
+## Session Information
+
+```{r sessioninfo, eval=TRUE}
+sessionInfo()
+```

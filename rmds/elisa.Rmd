@@ -1,0 +1,372 @@
+---
+title: "ELISA Data Differential Abundance Validation Analysis"
+author: "NICHD Bioinformatics and Scientific Programming Core"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+params:
+  ELISA_data:    NULL
+  sampletable:   NULL
+---
+
+# Analysis Overview
+
+This report validates the primary Olink PEA differential abundance result using
+matching ELISA measurements.
+
+With shipped **test data**, ELISA supports one contrast:
+
+- `disease_vs_control` (Group: disease vs control, adjusted for Cov1 + Cov2)
+
+If you are running real data, configure the **USER SETTINGS** blocks to match
+your metadata column names and desired contrast.
+
+```{r AnaylzeOlink, eval=FALSE, results='hide'}
+# When running interactively, and not from the Snakefile,
+# load the AnalyzeOlink R package, which is stored locally.
+# This package has many custom functions used throughout this document.
+devtools::document('../AnalyzeOlink')
+devtools::load_all('../AnalyzeOlink')
+```
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(org.Hs.eg.db)
+library(AnalyzeOlink)
+
+# afex defaults for Type-III ANCOVA-style models
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# Read config
+config <- yaml::read_yaml("../config/config.yaml")
+
+# Set up cache invalidation
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache.extra = list(
+    file.info("../config/config.yaml")$mtime,
+    file.info(config$input_data_paths$ELISA)$mtime,
+    file.info(config$sampletable_paths$ELISA)$mtime
+  )
+)
+
+# Use Snakemake inputs if running via Snakefile
+# otherwise, fall back to config contents
+if (!is.null(params$ELISA_data)) {
+  config$input_data_paths$ELISA <- params$ELISA_data
+}
+if (!is.null(params$sampletable)) {
+  config$sampletable_paths$ELISA <- params$sampletable
+}
+
+# Make output directories
+make_dirs(config)
+```
+
+```{r read-data, cache=TRUE}
+# Use SE metadata slot accessor as `data`
+data <- S4Vectors::metadata
+
+# Import ELISA data + sampletable
+raw_data <- import_data(
+  config$input_data_paths$ELISA,
+  config$sampletable_paths$ELISA
+)
+```
+
+```{r initial-se-object, cache=TRUE, dependson='read-data'}
+# Build a SummarizedExperiment from ELISA data
+se_initial <- prepare_data_for_se_list(
+  olink_data   = raw_data$data,
+  sampletable  = raw_data$sampletable,
+  elisa        = TRUE
+)
+
+se_list <- list(main = se_initial)
+```
+
+# QC & Outlier Handling (USER-CONFIGURABLE)
+
+Test data includes a deterministic outlier in **SampleID A1**.
+Update this block for real data.
+
+```{r elisa-user-qc-settings, cache=FALSE}
+# -------------------------------------------------------------------------
+# USER SETTINGS
+# -------------------------------------------------------------------------
+
+# Samples to remove entirely prior to modeling (often technical failures).
+# For shipped test data, remove A1 to mirror PEA pipeline.
+outlier_samples_to_remove <- c("A1")
+
+# Column that stores sample IDs
+sample_id_col <- "SampleID"
+```
+
+```{r remove-global-outliers, cache=TRUE, dependson='initial-se-object'}
+if (length(outlier_samples_to_remove) > 0) {
+  pattern_rm <- paste(outlier_samples_to_remove, collapse = "|")
+  se_list$main <- subset_se(
+    se_list$main,
+    column         = sample_id_col,
+    pattern        = pattern_rm,
+    keep_or_remove = "remove",
+    rm_qc_warn     = FALSE
+  )
+}
+```
+
+```{r initial_boxplots, dependson='remove-global-outliers'}
+init_data <- S4Vectors::metadata(se_list$main)$long_data
+
+# Boxplots to visualize potential outliers by Assay x Group strata.
+pdf_path_outliers <- plot_elisa_outliers(
+  init_data,
+  config$output_paths$elisa$qc,
+  by = c("Assay", "Group"),
+  k  = 1.5
+)
+
+pdf_path_no_outliers <- plot_elisa_outliers(
+  init_data,
+  config$output_paths$elisa$qc,
+  by = c("Assay", "Group"),
+  outfile         = "elisa_no_outliers.pdf",
+  detect_outliers = FALSE
+)
+
+outliers_by_assay <- tukey_outliers_list(init_data, by = c("Assay", "Group"))
+no_outlier_data   <- filter_elisa_outliers(init_data, outliers_by_assay)
+all_outliers      <- filter_elisa_outliers(init_data, outliers_by_assay, keep = TRUE)
+
+removed_elisa_path <- export_removed_rows(
+  init_data,
+  no_outlier_data,
+  config$output_paths$elisa$qc
+)
+```
+
+```{r no-outliers-se-object, cache=TRUE, dependson='remove-global-outliers'}
+# Build an SE where assay-level Tukey defined outliers are removed.
+# For test data we *do not* model this version; it is exported for review.
+se_list$no_outliers <- build_outlier_removed_se(
+  se                 = se_list$main,
+  long_df            = init_data,
+  by                 = c("Assay"),
+  k                  = 1.5,
+  value_col          = "ELISA",
+  outliers_by_assay  = outliers_by_assay,
+  restrict_samples   = TRUE
+)
+```
+
+```{r raw-data, results='hide', cache=TRUE, eval=TRUE, dependson='initial-se-object'}
+raw_data_table <- print_data(
+  se_list$main,
+  config$output_paths$elisa$raw_data,
+  show_first_n_rows = 100,
+  print_tables      = FALSE
+)
+```
+
+```{r filtered-data-qc, results='hide', eval=TRUE, cache=TRUE, dependson='no-outliers-se-object'}
+filtered_data_table <- print_data(
+  se_list$no_outliers,
+  config$output_paths$elisa$filtered_data,
+  show_first_n_rows = 100,
+  print_tables      = FALSE
+)
+```
+
+## More Details
+
+The FDR threshold used for this analysis is: `r config$alpha`.
+
+All outputs for this analysis are found in:
+`r dirname(config$output_paths$elisa[[1]])`
+
+## Quality control {.tabset}
+
+PCA is not feasible for ELISA because some assays have missing values across
+samples. Instead we inspect distributions and potential assay-level outliers.
+
+- [ELISA boxplots with outlier detection](`r pdf_path_outliers`)
+- [ELISA boxplots without outlier detection](`r pdf_path_no_outliers`)
+
+We treat Tukey-flagged points as potentially biological and keep them in the
+primary model unless you choose otherwise.
+
+Excluded rows (if any) are saved here:
+[ELISA removed rows Excel](`r removed_elisa_path`)
+
+# Contrast Definition (USER-CONFIGURABLE)
+
+ELISA uses the same model structure as PEA, but with response `ELISA`.
+
+```{r build-contrasts-parameters, results='asis', eval=TRUE, cache=TRUE, dependson='remove-global-outliers'}
+# -------------------------------------------------------------------------
+# USER SETTINGS edit this entire chunk for your own data
+# -------------------------------------------------------------------------
+group_col      <- "Group"         # column in sampletable that defines groups
+disease_level  <- "disease"       # disease level name
+control_level  <- "control"       # control level name
+
+cov_continuous <- "Cov1"          # continuous covariate (will be centered)
+cov_factor     <- "Cov2"          # categorical covariate
+
+dependent_var  <- "ELISA"           # assay column to model (NPX for PEA)
+
+alpha          <- config$alpha    # FDR threshold
+
+# -------------------------------------------------------------------------
+# 1) Subset to the samples needed for disease vs control
+# -------------------------------------------------------------------------
+# Keep only disease + control samples and mean‑center the continuous covariate.
+# center_numerics() appends "_c" to the centered covariate name.
+se_list$Disease <- subset_se(
+  se_list$main,
+  column         = group_col,
+  pattern        = paste0(disease_level, "|", control_level),
+  keep_or_remove = "keep"
+) %>%
+  center_numerics(cov_continuous)
+  # %>% add_PatientID; see add_PatientID from helpers.R to add a dependent sample identifier
+  # for lmer (linnear mixed effects) modeling
+
+# Pull the joined long data for easy editing
+df_long <- S4Vectors::metadata(se_list$Disease)$long_data
+
+# Ensure Group is a factor with disease first, then control
+df_long[[group_col]] <- factor(
+  df_long[[group_col]],
+  levels = c(disease_level, control_level)
+)
+
+# Ensure the categorical covariate is a factor (edit levels if you want ordering)
+df_long[[cov_factor]] <- factor(df_long[[cov_factor]])
+
+# Ensure SampleID is a factor for Error(SampleID) or lmer random intercepts
+df_long$SampleID <- factor(df_long$SampleID)
+
+# Save the modified long data back into the SE
+S4Vectors::metadata(se_list$Disease)$long_data <- df_long
+
+# Sync counts/metadata slots to the contrast‑specific subset
+se_list$Disease <- sync_se_to_metadata(se_list$Disease)
+
+# -------------------------------------------------------------------------
+# 2) Define model formula(s)
+# -------------------------------------------------------------------------
+cov_cont_c <- paste0(cov_continuous, "_c")
+formula_full_anova <- paste0(
+  dependent_var, " ~ ",
+  group_col, " * ", cov_cont_c, " + ",
+  cov_factor, " + Error(SampleID)"
+)
+
+contrast_list <- list()
+
+contrast_list$disease_vs_control_anova <- validate_parameters(
+  list(
+    name               = "disease_vs_control_anova",
+    se_object_name     = "Disease",
+    sampletable_column = group_col,
+    factor             = TRUE,
+    treatment          = disease_level,
+    control            = control_level,
+    observed           = c(cov_factor, cov_cont_c),
+    formula            = formula_full_anova,
+    more_factors       = cov_factor,
+    # Specify a posthoc test using emmeans using the syntax list(Column = c(level_1 vs level_2))
+    # Here we are using variables to reprent string column names so we must use the setNames syntax to build the list.
+    emm                = setNames(list(c(disease_level, control_level)), group_col), # group_col ("Group" will be your main effect in the results table)
+    report_lfc         = TRUE,
+    alt_lfc_col        = NULL, # If you're main effect term is a continuous variable, set emm to NULL and optionally chose an alternative column to
+                               # use to report a L2FC value (Column must be a 2 level factor)
+    alpha              = alpha,
+    run_stats          = c("anova")
+  ),
+  se_list
+)
+
+```
+
+```{r test-contrasts, eval=TRUE, cache=TRUE, results='asis', dependson='build-contrasts-parameters'}
+res_list <- run_tests(contrast_list, se_list)
+res_list <- append_geneid(res_list)
+```
+
+```{r subset-res-list, eval=TRUE, cache=TRUE, dependson='test-contrasts'}
+res_list_subset_1_effect <- keep_primary_effects(res_list)
+num_significant <- report_num_significant(res_list_subset_1_effect)
+```
+
+## Contrast Design
+
+#### disease_vs_control
+
+**Biological question:** *How do disease cases differ from controls in ELISA,
+after adjusting for Cov1 and Cov2?*
+
+**Approach:** Two‑way ANCOVA (`afex::aov_car`, Type III SS) with Cov1 interaction.
+Main Group effect is evaluated via emmeans Wald t‑test; covariate terms use F‑tests.
+
+**Formula (mean‑centered Cov1):**
+`ELISA ~ Group * Cov1_c + Cov2 + Error(SampleID)`
+
+---
+
+## Results {.tabset}
+
+```{r print-results, results='asis', eval=TRUE, cache=FALSE, dependson='test-contrasts'}
+print_stats_results(
+  res_list,
+  res_list_subset_1_effect,
+  config$output_paths$elisa$results
+)
+```
+
+## Volcano Plots {.tabset}
+
+```{r volcano-plot, results='asis', eval=TRUE, cache=FALSE}
+volcano(
+  res_list_subset_1_effect,
+  se_list,
+  config,
+  out_dir = config$output_paths$elisa$plots
+)
+```
+
+## Boxplots {.tabset}
+
+```{r boxplot, results='asis', eval=TRUE, cache=FALSE}
+boxplot(
+  res_list_subset_1_effect,
+  config,
+  out_dir = config$output_paths$elisa$plots,
+  dependent_var = "ELISA"
+)
+```
+
+```{r export-all-results, eval=TRUE}
+saveRDS(
+  list(
+    res_list      = res_list,
+    se_list       = se_list,
+    contrast_list = contrast_list
+  ),
+  file     = file.path(config$output_data_paths$ELISA),
+  compress = FALSE
+)
+```
+
+## Session Information
+
+```{r sessioninfo, eval=TRUE}
+sessionInfo()
+```

@@ -1,0 +1,32 @@
+Package: AnalyzeOlink
+Title: Apply Various Statistical Frameworks to Analyze Olink PEA Data
+Version: 0.1.0
+Authors@R:
+    c(
+      person("Matthew", "Menold", email = "Matthew.Menold@gmail.com", role = c("aut", "cre")),
+      person("Ryan", "Dale", role = c("aut", "ctb"))
+    )
+Description: AnalyzeOlink provides a configurable framework for analyzing
+ Olink Proximity Extension Assay (PEA) data, including differential abundance
+ testing and downstream validation. Supported statistical methods include Type
+ III ANCOVA and linear mixed-effects models (via the 'afex' package), t-tests
+ and Wilcoxon tests (paired and unpaired), as well as Kruskal–Wallis and
+ Friedman tests. The package includes nine R Markdown analysis reports that
+ cover key workflow components such as assumption checks for ANOVA and LMER
+ models, leave-one-out sensitivity analyses for model terms and sample-level
+ robustness, ELISA validation, and non-parametric covariate effect and NPX
+ correlations testing. An annotations module integrates Human Protein Atlas
+ (HPA) metadata, including tissue- and cell-type–specific expression profiles
+ and Tau specificity scores, enabling annotation of downstream visualizations
+ such as volcano plots and estimate-vs-estimate comparisons.
+License: use_mit_license()
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Imports:
+    dplyr,
+    purrr,
+    org.Hs.eg.db
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3

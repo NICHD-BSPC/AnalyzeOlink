@@ -1,0 +1,425 @@
+# ---------------------------------------------------------------------------------------
+# Snakefile workflow automation script to produce output for the entire analysis pipeline
+# ---------------------------------------------------------------------------------------
+import os
+
+# Load config
+configfile: "../config/config.yaml"
+
+# Get RMD files from config
+RMD_FILES = config["snakemake"]["RMD_FILES"]
+
+# Convert the list of script base names from config into .html output paths
+rmd_outputs = expand(
+    "../rmds/{file}.html",
+    file=RMD_FILES
+)
+
+rule all:
+    """
+    Request .html reports as indicators of Rmd script run completion.
+    All outputs are found linked in these .html reports whose
+    .Rmd scripts are defined in config.snakemake.RMD_FILES.
+    """
+    input:
+        rmd_outputs
+
+
+rule install_analyzeolink_local_package:
+    """
+    Install the AnalyzeOlink R package once per workflow run.
+    """
+    output:
+        touch("logs/install_analyzeolink.done")
+    shell:
+        """
+        set -euo pipefail
+        rm -rf ../environment/env/lib/R/library/00LOCK-AnalyzeOlink || true
+        Rscript -e "devtools::install('../AnalyzeOlink', upgrade = 'never')"
+        touch logs/install_analyzeolink.done
+        """
+
+
+# PEA data differential expression core analysis
+# All _pea.Rmd scripts depend on this rule
+rule differential_expression:
+    """
+    Perform data preprocessing, QC, and statistical testing on Olink NPX data
+    using differential_expression.Rmd.
+    """
+    input:
+        rmd         = "../rmds/differential_expression.Rmd",
+        npx_data    = config["input_data_paths"]["PEA"],
+        sampletable = config["sampletable_paths"]["PEA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/differential_expression.html",
+        rds  = config["output_data_paths"]["PEA"]
+    params:
+        npx_data    = lambda wildcards, input: input.npx_data,
+        sampletable = lambda wildcards, input: input.sampletable
+    log:
+        "logs/differential_expression.log"
+    threads: 4
+    resources:
+        mem_mb  = 16 * 1024,  # MB
+        runtime = 30          # min
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                npx_data    = "{params.npx_data}",
+                sampletable = "{params.sampletable}"
+              ),
+              quiet = FALSE
+            )'
+          if [ ! -s "{output.rds}" ]; then
+            cat << EOF >&2
+ERROR: {output.rds} missing or empty.
+This file is expected by downstream *_pea rules.
+EOF
+            exit 1
+          fi
+        ) > {log} 2>&1
+        """
+
+rule assumptions_pea:
+    """
+    Parametric assumption violation analysis on Olink NPX data
+    using assumptions_pea.Rmd.
+    Depends on the PEA RDS from differential_expression.Rmd.
+    """
+    input:
+        rmd         = "../rmds/assumptions_pea.Rmd",
+        npx_data    = config["input_data_paths"]["PEA"],
+        sampletable = config["sampletable_paths"]["PEA"],
+        data        = config["output_data_paths"]["PEA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/assumptions_pea.html"
+    params:
+        npx_data    = lambda wildcards, input: input.npx_data,
+        sampletable = lambda wildcards, input: input.sampletable,
+        data        = lambda wildcards, input: input.data
+    log:
+        "logs/assumptions_pea.log"
+    threads: 44
+    resources:
+        mem_mb  = 64 * 1024,
+        runtime = 30
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                npx_data    = "{params.npx_data}",
+                sampletable = "{params.sampletable}",
+                data        = "{params.data}"
+              ),
+              quiet = FALSE
+            )'
+        ) > {log} 2>&1
+        """
+
+rule sensitivity_pea:
+    """
+    Sensitivity analysis on Olink NPX data using sensitivity_pea.Rmd.
+    Depends on the PEA RDS from differential_expression.Rmd.
+    """
+    input:
+        rmd         = "../rmds/sensitivity_pea.Rmd",
+        npx_data    = config["input_data_paths"]["PEA"],
+        sampletable = config["sampletable_paths"]["PEA"],
+        data        = config["output_data_paths"]["PEA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/sensitivity_pea.html"
+    params:
+        npx_data    = lambda wildcards, input: input.npx_data,
+        sampletable = lambda wildcards, input: input.sampletable,
+        data        = lambda wildcards, input: input.data
+    log:
+        "logs/sensitivity_pea.log"
+    threads: 64
+    resources:
+        mem_mb  = 128 * 1024,
+        runtime = 30
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                npx_data    = "{params.npx_data}",
+                sampletable = "{params.sampletable}",
+                data        = "{params.data}"
+              ),
+              quiet = FALSE
+            )'
+        ) > {log} 2>&1
+        """
+
+rule covariates_pea:
+    """
+    Analyze potential confounding effects of Cov1 and Cov2 across contrasts
+    using covariates_pea.Rmd.
+    Depends on the PEA RDS from differential_expression.Rmd.
+    """
+    input:
+        rmd         = "../rmds/covariates_pea.Rmd",
+        npx_data    = config["input_data_paths"]["PEA"],
+        sampletable = config["sampletable_paths"]["PEA"],
+        data        = config["output_data_paths"]["PEA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/covariates_pea.html"
+    params:
+        npx_data    = lambda wildcards, input: input.npx_data,
+        sampletable = lambda wildcards, input: input.sampletable,
+        data        = lambda wildcards, input: input.data
+    log:
+        "logs/covariates_pea.log"
+    threads: 1
+    resources:
+        mem_mb  = 8 * 1024,
+        runtime = 10
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                npx_data    = "{params.npx_data}",
+                sampletable = "{params.sampletable}",
+                data        = "{params.data}"
+              ),
+              quiet = FALSE
+            )'
+        ) > {log} 2>&1
+        """
+
+rule correlations_pea:
+    """
+    Spearman correlation analysis between NPX values and metadata
+    variables using correlations_pea.Rmd.
+    Depends on the PEA RDS from differential_expression.Rmd.
+    """
+    input:
+        rmd         = "../rmds/correlations_pea.Rmd",
+        npx_data    = config["input_data_paths"]["PEA"],
+        sampletable = config["sampletable_paths"]["PEA"],
+        data        = config["output_data_paths"]["PEA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/correlations_pea.html"
+    params:
+        npx_data    = lambda wildcards, input: input.npx_data,
+        sampletable = lambda wildcards, input: input.sampletable,
+        data        = lambda wildcards, input: input.data
+    log:
+        "logs/correlations_pea.log"
+    threads: 1
+    resources:
+        mem_mb  = 4 * 1024,
+        runtime = 10
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                npx_data    = "{params.npx_data}",
+                sampletable = "{params.sampletable}",
+                data        = "{params.data}"
+              ),
+              quiet = FALSE
+            )'
+        ) > {log} 2>&1
+        """
+
+rule functional_enrichment:
+    """
+    Functional enrichment analysis on DE results using
+    functional_enrichment_pea.Rmd.
+    Depends on the PEA RDS from differential_expression.Rmd.
+    """
+    input:
+        rmd         = "../rmds/functional_enrichment_pea.Rmd",
+        npx_data    = config["input_data_paths"]["PEA"],
+        sampletable = config["sampletable_paths"]["PEA"],
+        data        = config["output_data_paths"]["PEA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/functional_enrichment_pea.html"
+    params:
+        npx_data    = lambda wildcards, input: input.npx_data,
+        sampletable = lambda wildcards, input: input.sampletable,
+        data        = lambda wildcards, input: input.data
+    log:
+        "logs/functional_enrichment.log"
+    threads: 44
+    resources:
+        mem_mb  = 64 * 1024,
+        runtime = 30
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                npx_data    = "{params.npx_data}",
+                sampletable = "{params.sampletable}",
+                data        = "{params.data}"
+              ),
+              quiet = FALSE
+            )'
+        ) > {log} 2>&1
+        """
+
+rule annotations_pea:
+    """
+    Annotate Olink NPX results with Human Protein Atlas IHC tissue-specific
+    protein expression data using annotations_pea.Rmd.
+    Depends on the PEA RDS from differential_expression.Rmd.
+    """
+    input:
+        rmd         = "../rmds/annotations_pea.Rmd",
+        npx_data    = config["input_data_paths"]["PEA"],
+        sampletable = config["sampletable_paths"]["PEA"],
+        data        = config["output_data_paths"]["PEA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/annotations_pea.html"
+    params:
+        npx_data    = lambda wildcards, input: input.npx_data,
+        sampletable = lambda wildcards, input: input.sampletable,
+        data        = lambda wildcards, input: input.data
+    log:
+        "logs/annotations_pea.log"
+    threads: 1
+    resources:
+        mem_mb  = 16 * 1024,
+        runtime = 30
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                npx_data    = "{params.npx_data}",
+                sampletable = "{params.sampletable}",
+                data        = "{params.data}"
+              ),
+              quiet = FALSE
+            )'
+        ) > {log} 2>&1
+        """
+
+rule elisa:
+    """
+    Perform QC, and differential statistical testing on ELISA validation data
+    using elisa.Rmd.
+    """
+    input:
+        rmd         = "../rmds/elisa.Rmd",
+        elisa_data  = config["input_data_paths"]["ELISA"],
+        sampletable = config["sampletable_paths"]["ELISA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/elisa.html",
+        rds  = config["output_data_paths"]["ELISA"]
+    params:
+        ELISA_data  = lambda wildcards, input: input.elisa_data,
+        sampletable = lambda wildcards, input: input.sampletable
+    log:
+        "logs/elisa.log"
+    threads: 4
+    resources:
+        mem_mb  = 16 * 1024,
+        runtime = 30
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                ELISA_data  = "{params.ELISA_data}",
+                sampletable = "{params.sampletable}"
+              ),
+              quiet = FALSE
+            )'
+          if [ ! -s "{output.rds}" ]; then
+            cat << EOF >&2
+ERROR: {output.rds} missing or empty.
+This file is expected by downstream *_elisa rules.
+EOF
+            exit 1
+          fi
+        ) > {log} 2>&1
+        """
+
+rule assumptions_elisa:
+    """
+    Parametric assumption violation analysis on ELISA data
+    using assumptions_elisa.Rmd.
+    Depends on the ELISA RDS from elisa.Rmd.
+    """
+    input:
+        rmd         = "../rmds/assumptions_elisa.Rmd",
+        data        = config["output_data_paths"]["ELISA"],
+        sampletable = config["sampletable_paths"]["ELISA"],
+        install_ok  = "logs/install_analyzeolink.done"
+    output:
+        html = "../rmds/assumptions_elisa.html"
+    params:
+        data        = lambda wildcards, input: input.data,
+        sampletable = lambda wildcards, input: input.sampletable
+    log:
+        "logs/assumptions_elisa.log"
+    threads: 44
+    resources:
+        mem_mb  = 64 * 1024,
+        runtime = 30
+    shell:
+        """
+        set -euo pipefail
+        (
+          Rscript --vanilla --verbose -e '
+            rmarkdown::render(
+              "{input.rmd}",
+              output_file = "{output.html}",
+              params = list(
+                data        = "{params.data}",
+                sampletable = "{params.sampletable}"
+              ),
+              quiet = FALSE
+            )'
+        ) > {log} 2>&1
+        """

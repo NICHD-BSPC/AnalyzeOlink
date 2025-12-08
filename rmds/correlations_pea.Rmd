@@ -1,0 +1,197 @@
+---
+title: "Metadata Correlations Analysis"
+author: "NICHD Bioinformatics and Scientific Programming Core"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+params:
+  npx_data:        NULL
+  sampletable:     NULL
+  data:            NULL
+---
+
+# Analysis Overview
+
+This report performs Spearman correlation analyses of Olink NPX values against
+continuous clinical / metadata variables.
+
+Spearman correlation is non‑parametric and **univariate**: it does not adjust
+for other covariates (e.g., age‑like effects). Use this as an exploratory
+screen, then confirm key findings in your primary models.
+
+With shipped **test data**, metadata includes:
+
+- `Group` (disease/control, categorical)
+- `Cov1` (continuous)
+- `Cov2` (categorical)
+
+Therefore, the default test‑data correlation is **Cov1 vs NPX**.
+
+For user supplied data, fill out the USER SETTINGS section below.
+
+```{r AnaylzeOlink, eval=FALSE, results='hide'}
+# When running interactively, and not from the Snakefile,
+# load the AnalyzeOlink R package, which is stored locally.
+# This package has many custom functions used throughout this document.
+devtools::document('../../AnalyzeOlink')
+devtools::load_all('../../AnalyzeOlink')
+```
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(AnalyzeOlink)
+
+# Read config
+config <- yaml::read_yaml("../config/config.yaml")
+
+# Set up cache invalidation
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache.extra = list(
+    file.info("../config/config.yaml")$mtime,
+    file.info(config$input_data_paths$PEA)$mtime,
+    file.info(config$sampletable_paths$PEA)$mtime,
+    file.info(config$output_data_paths$PEA)$mtime
+  )
+)
+
+# Use Snakemake inputs if running via Snakefile
+# otherwise, fall back to config contents
+if (!is.null(params$npx_data)) {
+  config$input_data_paths$PEA <- params$npx_data
+}
+if (!is.null(params$sampletable)) {
+  config$sampletable_paths$PEA <- params$sampletable
+}
+if (!is.null(params$data)) {
+  config$output_data_paths$PEA <- params$data
+}
+```
+
+## More Details
+
+The alpha value used for this analysis is: `r config$alpha`
+
+All outputs for this analysis are found in:
+`r dirname(config$output_paths$correlations_pea$plots)`
+
+```{r fetch-data-from-olinkanalyze, cache=TRUE}
+olink_analyze_data <- readRDS(config$output_data_paths$PEA)
+se_list            <- olink_analyze_data$se_list
+```
+
+# Correlation Settings (USER‑CONFIGURABLE)
+
+Most users only need to edit this block.
+
+```{r correlations-user-settings, cache=FALSE}
+# -------------------------------------------------------------------------
+# USER SETTINGS
+# -------------------------------------------------------------------------
+
+# 1) Choose which dataset in se_list to use for correlations.
+#    - If running test data, "main" should exist.
+#    - Otherwise pick any contrast‑specific SE you want.
+dataset_name <- if ("main" %in% names(se_list)) "main" else names(se_list)[1]
+
+# 2) Continuous metadata variables to correlate against NPX.
+#    Default supports shipped test data.
+vars <- c("Cov1")
+
+# 3) Color column to color the correlations scatter plots
+color_col <- "Group" # levels: disease/control for test data
+
+# 3) OPTIONAL: if you want to correlate NPX against variables using a
+# subset of the full dataset, make that dataset below. See README.md for
+# more details
+
+# Pull long-format NPX + metadata
+long_data <- S4Vectors::metadata(se_list[[dataset_name]])$long_data
+
+# For most users, correlate NPX vs variables using a single dataset.
+long_data_subset <- long_data
+# -------------------------------------------------------------------------
+
+# -------------------------------------------------------------------------
+# Sanity checks
+# -------------------------------------------------------------------------
+missing_vars <- setdiff(vars, colnames(long_data_subset))
+if (length(missing_vars) > 0) {
+  stop("These vars are not in long_data_subset: ", paste(missing_vars, collapse = ", "))
+}
+
+# Spearman needs numeric inputs; drop non‑numeric vars with a clear message.
+is_num <- vapply(long_data_subset[, vars, drop = FALSE], is.numeric, logical(1))
+if (!all(is_num)) {
+  bad <- vars[!is_num]
+  stop(
+    "Spearman correlations require numeric vars. Non‑numeric vars provided: ",
+    paste(bad, collapse = ", "),
+    "\nTip: encode categorical vars (e.g., scores) numerically or remove them here."
+  )
+}
+```
+
+```{r run-correlations-analysis, results='asis', dependson='prepare-data', cache=TRUE}
+# Compute correlations
+spearman_res <- compute_spearman(
+  long_data, long_data_subset, vars, config$alpha
+)
+
+num_sig  <- report_num_sig_corr(spearman_res)
+
+# Export results to Excel and get the path
+xlsx_path <- export_spearman(spearman_res, config$output_paths$correlations_pea$results)
+```
+
+## Spearman Correlation Overview
+
+Each metadata variable was tested for association with protein NPX values using
+Spearman’s rank correlation.
+
+```{r spearman-summary-text, results='asis', cache=FALSE}
+for (v in vars) {
+  mdcat(paste0("### ", v))
+  mdcat(paste0(
+    "- Test performed: Spearman correlation between **", v, "** and NPX values.\n",
+    "- Identified **", get_num_sig_corr(spearman_res, v), "** correlated proteins.\n"
+  ))
+}
+```
+
+## Spearman Correlations Summary Violin Plot
+
+```{r violin-plot, eval=TRUE, cache=FALSE, results='asis'}
+plot_spearman_violins(
+  spearman_res,
+  outdir     = config$output_paths$correlations_pea$plots,
+  categories = vars,
+  order_by   = "median_abs"
+)
+```
+
+## Spearman Correlations Tables {.tabset}
+
+```{r print-correlations-analysis, results='asis', dependson='run-correlations-analysis', eval=TRUE, cache=FALSE}
+# Print correlations results tables
+print_spearman_tables(spearman_res, xlsx_path)
+
+# All top‑20 significant (both signs)
+print_top_corr_plots(spearman_res, long_data, long_data_subset, color_col, vars, config$output_paths$correlations_pea$plots)
+
+# Top‑20 positive significant
+print_top_corr_plots(spearman_res, long_data, long_data_subset, color_col, vars, config$output_paths$correlations_pea$plots, sign = "pos")
+
+# Top‑20 negative significant
+print_top_corr_plots(spearman_res, long_data, long_data_subset, color_col, vars, config$output_paths$correlations_pea$plots, sign = "neg")
+```
+
+## Session Information
+
+```{r sessioninfo, eval=TRUE, echo=FALSE}
+sessionInfo()
+```

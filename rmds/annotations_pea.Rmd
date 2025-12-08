@@ -1,0 +1,234 @@
+---
+title: "Human Protein Atlas Annotations of PEA Results"
+author: "NICHD Bioinformatics and Scientific Programming Core"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+params:
+  npx_data:        NULL
+  sampletable:     NULL
+  data:            NULL
+---
+
+# Analysis Overview
+
+This report annotates Olink PEA differential abundance results with brain- and
+tissue-specific protein expression from the
+[Human Protein Atlas (HPA) IHC dataset](https://www.proteinatlas.org/humanproteome/tissue/data#normal_tissues_ihc).
+
+With the shipped **test data**, only one contrast is available:
+
+- **Group (disease vs control)**, adjusted for `Cov1` and `Cov2`.
+
+If you are running your own data, update the **USER SETTINGS** section below to
+choose which contrast and which HPA columns you want to visualize.
+
+```{r AnaylzeOlink, eval=FALSE, results='hide'}
+# When running interactively, and not from the Snakefile,
+# load the AnalyzeOlink R package, which is stored locally.
+# This package has many custom functions used throughout this document.
+devtools::document('../../AnalyzeOlink')
+devtools::load_all('../../AnalyzeOlink')
+```
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(AnalyzeOlink)
+
+# Read config
+config <- yaml::read_yaml("../config/config.yaml")
+
+# Set up cache invalidation
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache.lazy = FALSE,
+  cache.extra = list(
+    file.info("../config/config.yaml")$mtime,
+    file.info(config$input_data_paths$PEA)$mtime,
+    file.info(config$sampletable_paths$PEA)$mtime,
+    file.info(config$output_data_paths$PEA)$mtime
+  )
+)
+
+# Use Snakemake inputs if running via Snakefile
+# otherwise, fall back to config contents
+if (!is.null(params$npx_data)) {
+  config$input_data_paths$PEA <- params$npx_data
+}
+if (!is.null(params$sampletable)) {
+  config$sampletable_paths$PEA <- params$sampletable
+}
+if (!is.null(params$data)) {
+  config$output_data_paths$PEA <- params$data
+}
+```
+
+```{r fetch-data-from-olinkanalyze, results='asis', eval=TRUE, cache=TRUE}
+olink_analyze_data <- readRDS(config$output_data_paths$PEA)
+se_list            <- olink_analyze_data$se_list
+res_list           <- olink_analyze_data$res_list
+```
+
+```{r add-brain-annotations, eval=TRUE, cache=FALSE, dependson='fetch-data-from-olinkanalyze'}
+# Annotate res_list with HPA IHC data
+brain_annotations <- append_brain_annotations_tbl(
+  res_list,
+  config$output_paths$annotations_pea$raw_data
+)
+
+res_list    <- brain_annotations$res
+hpa_data    <- brain_annotations$hpa_data
+hpa_summary <- brain_annotations$hpa_summary
+```
+
+```{r subset-res-list, eval=TRUE, cache=TRUE, dependson='add-brain-annotations'}
+# Only keep statistics for primary effects only
+# (with test data this is Group for disease_vs_control)
+res_list_subset_1_effect <- keep_primary_effects(res_list)
+```
+
+```{r export-hpa-data, eval=TRUE, cache=FALSE, dependson='add-brain-annotations'}
+# Write the joined tissue-organ mapping table with IHC data to output/annotations/raw_data
+hpa_path <- export_hpa_ihc_data(
+  hpa_data,
+  outdir = config$output_paths$annotations_pea$results
+)
+```
+
+## Human Protein Atlas Data
+
+We use the Human Protein Atlas (HPA)
+["Protein Expression IHC (immunohistochemistry)" dataset](https://www.proteinatlas.org/humanproteome/tissue/data#normal_tissues_ihc)
+to annotate our PEA results. HPA IHC provides semi-quantitative intensity scores
+(0–3) across many tissues and cell types, plus curated summaries on blood
+plasma proteins, subcellular localization, and protein–protein interactions.
+
+## Human Protein Atlas Exploration
+
+Volcano plot points are clickable and open the HPA expression page for
+each protein (gene). For example:
+[CTSL protein atlas page](https://www.proteinatlas.org/ENSG00000135047-CTSL).
+
+On each gene page, you can explore region-specific expression levels,
+RNA vs protein comparisons, and written biological summaries.
+
+## HPA IHC data
+
+Here is the long-format HPA data used for annotation:
+[HPA IHC data](`r hpa_path`).
+
+Above each volcano plot, you'll find a link to an Excel workbook containing the
+corresponding PEA stats results appended with HPA derived annotations.
+
+```{r export-anatomical-annotations-data, eval=TRUE, cache=FALSE, dependson='add-brain-annotations'}
+# Export the HPA IHC + PEA stats results data for each contrast
+annotations_results_paths <- parallel_export_annotations(
+  res_list,
+  config$output_paths$annotations_pea$results
+)
+```
+
+# Plot Configuration (USER-CONFIGURABLE)
+
+```{r annotations-user-settings, cache=FALSE}
+# -------------------------------------------------------------------------
+# USER SETTINGS
+# -------------------------------------------------------------------------
+
+# 1) Which validated contrast(s) should be plotted?
+#    With test data, res_list_subset_1_effect has only disease vs control.
+contrasts_to_plot <- names(res_list_subset_1_effect)
+
+# 2) Which HPA columns should color the volcano plots?
+#    These column names must exist in the annotated results.
+hpa_volcano_columns <- c(
+  "BrainDetected",
+  "BrainSpecific",
+  "BrainPurkinjeSpecific",
+  "Cerebellum",
+  "Caudate",
+  "CerebralCortex",
+  "Hippocampus"
+)
+
+# 3) Toggle plots on/off
+toggle_plots <- TRUE
+
+# -------------------------------------------------------------------------
+# Sanity checks
+# -------------------------------------------------------------------------
+bad_ctr <- setdiff(contrasts_to_plot, names(res_list_subset_1_effect))
+if (length(bad_ctr) > 0) {
+  stop("Unknown contrasts in contrasts_to_plot: ", paste(bad_ctr, collapse = ", "))
+}
+
+# Ensure requested HPA columns exist in at least one contrast table
+example_tbl <- res_list_subset_1_effect[[contrasts_to_plot[1]]]$anova
+bad_cols <- setdiff(hpa_volcano_columns, colnames(example_tbl))
+if (length(bad_cols) > 0) {
+  stop("Unknown HPA columns in hpa_volcano_columns: ", paste(bad_cols, collapse = ", "))
+}
+
+# Subset to chosen contrasts
+res_list_subset_1_effect <- res_list_subset_1_effect[contrasts_to_plot]
+```
+
+## Annotated Volcano Plots {.tabset}
+
+Volcano plots show effect size (estimate) vs significance (–log10 adj. p-value)
+for each contrast, colored by a chosen HPA annotation. Clicking a point opens
+the corresponding HPA gene page.
+
+Legend notes:
+
+- Proteins not in HPA IHC appear as 0.
+- "BrainDetected" and "BrainSpecific" are binary (0/1).
+- Tissue columns (e.g., Cerebellum) are 0–3 staining intensity.
+- "BrainPurkinjeSpecific" is 0–3, encoding brain specificity + Purkinje intensity.
+
+```{r volcano-plots-loop, results='asis', eval=toggle_plots, cache=FALSE}
+for (col in hpa_volcano_columns) {
+  mdcat(paste0("## Volcano Plot colored by: ", col))
+  annotations_volcano(
+    res_list_subset_1_effect,
+    se_list,
+    outdir = config$output_paths$annotations_pea$plots,
+    annotations_results_paths,
+    color_by = col
+  )
+}
+```
+
+---
+
+### Optional: Annotated Concordance
+
+If your analysis includes **two contrasts** (e.g., disease vs control and a
+treatment contrast), you can use `annotations_estimate_plot()` to visualize
+concordance colored by HPA annotations. These plots are also disabled by
+default for test data in differential_expression.Rmd
+
+This section is disabled for shipped test data.
+
+```{r annotated-estimate-plots-optional, eval=FALSE, cache=FALSE}
+# Example:
+# annotations_estimate_plot(
+#   res_list_subset_1_effect,
+#   outdir = config$output_paths$annotations_pea$plots,
+#   contrasts = c("contrast_A", "contrast_B"),
+#   color_by  = "BrainDetected",
+#   plotly    = TRUE,
+#   label_n   = 10
+# )
+```
+
+## Session Information
+
+```{r sessioninfo, eval=TRUE}
+sessionInfo()
+```

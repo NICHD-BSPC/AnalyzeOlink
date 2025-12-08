@@ -1,0 +1,592 @@
+---
+title: "Olink® PEA Data Differential Abundance Analysis"
+author: "NICHD Bioinformatics and Scientific Programming Core"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 3
+params:
+  npx_data:        NULL
+  sampletable:     NULL
+---
+
+# Analysis Overview
+
+This report contains the following components of the Olink PEA NPX data
+analysis pipeline:
+
+1. **Data Import**
+
+2. **Quality control:**
+   - **Outlier Detection & QC Warning Removals**
+   - **Model Fit Assessment with Cook's Distance**
+
+3. **Contrast Definitions (USER‑CONFIGURABLE)**
+
+4. **Statistical Testing (multiple test types on the same contrast for test data)**
+
+5. **Results Visualizations**
+
+```{r AnaylzeOlink, eval=FALSE, results='hide'}
+# When running interactively, and not from the Snakefile,
+# load the AnalyzeOlink R package, which is stored locally.
+# This package has many custom functions used throughout this document.
+devtools::document('../AnalyzeOlink')
+devtools::load_all('../AnalyzeOlink')
+```
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(purrr)
+library(org.Hs.eg.db)
+library(AnalyzeOlink)
+
+# Set afex package defaults for anova testing:
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# Read config
+config <- yaml::read_yaml("../config/config.yaml")
+
+# Set up cache invalidation
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache.extra = list(
+    file.info("../config/config.yaml")$mtime,
+    file.info(config$input_data_paths$PEA)$mtime,
+    file.info(config$sampletable_paths$PEA)$mtime
+  )
+)
+
+# Use Snakemake inputs if running via Snakefile
+# otherwise, fall back to config contents
+if (!is.null(params$npx_data)) {
+  config$input_data_paths$PEA <- params$npx_data
+}
+if (!is.null(params$sampletable)) {
+  config$sampletable_paths$ELISA <- params$sampletable
+}
+
+# Make directories to store data, tabular results and visualizations from QC,
+# and stats
+make_dirs(config)
+```
+
+```{r read-data, cache=TRUE}
+# We will use the SummarizedExperiment S4 object's metadata slot to
+# store the long format Olink NPX data so lets rename the function used
+# to access that slot to `data`
+data <- S4Vectors::metadata
+
+# Import the raw data
+raw_data <- import_data(
+  config$input_data_paths$PEA,
+  config$sampletable_paths$PEA
+)
+```
+
+```{r initial-se-object, cache=TRUE, dependson='read-data'}
+# Create a SummarizedExperiment object using the raw data and sample
+# table.
+se_initial <- prepare_data_for_se_list(
+  olink_data   = raw_data$data,
+  sampletable  = raw_data$sampletable
+)
+
+# Create a list to store the initial SE object and later modified versions.
+se_list <- list(main = se_initial)
+```
+
+
+```{r user-qc-settings, cache=FALSE}
+# -------------------------------------------------------------------------   
+# USER SETTINGS
+# -------------------------------------------------------------------------
+#  Use the below QC plots ("QC" and "PCA") to check if sample(s) is an
+#  outlier, remove it here. For the
+#  shipped test data, SampleID == "A1" is a deterministic outlier.
+#  Change "A1" to your own outlier SampleID(s), or delete this block.
+
+outlier_samples_to_remove <- c("A1")
+
+# Column that stores sample IDs
+sample_id_col <- "SampleID"
+
+
+if (length(outlier_samples_to_remove) > 0) {
+  pattern_rm <- paste(outlier_samples_to_remove, collapse = "|")
+  se_list$main <- subset_se(
+    se_list$main,
+    column         = sample_id_col,
+    pattern        = pattern_rm,
+    keep_or_remove = "remove",
+    rm_qc_warn     = FALSE
+  )
+}
+```
+
+```{r export-removed-data, cache=FALSE}
+# Export the raw data rows that were removed due to the removal of the outlier
+# and the QC warning indications from Olink
+init_data        <- S4Vectors::metadata(se_initial)$long_data
+no_outlier_data  <- S4Vectors::metadata(se_list$main)$long_data
+removed_npx_path <- export_removed_rows(
+  init_data,
+  no_outlier_data,
+  config$output_paths$differential_expression$qc
+)
+
+# Record all assays that would be removed by the Olink provided "Assay_Warning"
+removed_assays <- init_data %>%
+  filter(Assay_Warning == "WARN") %>%
+  distinct(Assay, Panel) %>%
+  arrange(Panel, Assay)
+```
+
+## More Details
+
+The FDR threshold used for this analysis is: `r config$alpha`.
+
+All outputs for this analysis are found in
+`r dirname(config$output_paths$differential_expression[[1]])`
+
+The full raw dataset can be found via the Excel link below.
+
+## Raw Data
+
+The Excel workbook linked below contains a sheet for the metadata, the
+joined outlier and qc warning removed Olink NPX data and metadata,
+and the NPX counts matrix.
+
+```{r raw-data, results='asis', cache=TRUE, eval=TRUE, dependson='initial-se-object'}
+raw_data_tables <- print_data(
+  se_initial,
+  config$output_paths$differential_expression$raw_data,
+  show_first_n_rows = 100,
+  print_tables = FALSE
+)
+```
+
+## Quality control {.tabset}
+
+Under the **QC Plots** tab are facet plots used to evaluate potential
+outliers.
+
+**IQR vs. Median Plots**
+
+Each panel contains a plot of interquartile range
+(IQR) versus median NPX, where each point represents a sample.
+
+- Horizontal dashed lines mark ±3 standard deviations from the mean NPX IQR.
+
+- Vertical dashed lines mark ±3 standard deviations from the mean NPX median.
+
+These thresholds help identify samples with unusually high variance or
+unusually high/low overall NPX levels.
+
+**PCA Projection**
+
+PCA clusters samples based on similarities in their overall
+protein expression patterns, making it useful for diagnosing global sources of
+variation—including biological differences, batch effects, and major technical
+artifacts.
+
+However, PCA alone cannot identify *which* factor causes the variation.
+
+- Horizontal dashed lines indicate ±3 SD from the mean PC2 values.
+
+- Vertical dashed lines indicate ±3 SD from the mean PC1 values.
+
+**Olink Technical QC Olink provides independent QC metrics at two levels:**
+- **Per-sample, per-protein QC** (each row of the raw NPX matrix)
+
+- **Per-assay QC**, which flags entire proteins with technical issues across all samples
+
+NPX values flagged by Olink as low quality were excluded from downstream
+analyses. Olink acutally recommends retaining all of the data that
+is shipped with internal QC warnings, but we built the infrastructure to
+remove it if you prefer.
+
+Removed Data Excel file, containing all NPX rows removed due to
+outlier and QC warning removals, is available here:
+[**NPX Removed Excel**](`r removed_npx_path`)
+
+```{r init-data-qc-plots, results='asis', eval=TRUE, cache=TRUE, dependson='initial-se-object'}
+qc(init_data, config, out_dir = config$output_paths$differential_expression$qc, path_prefix = "initial")
+pca(init_data, config, out_dir = config$output_paths$differential_expression$qc, path_prefix = "initial", label = "A1")
+```
+
+## Filtered Data
+
+```{r filtered-data-qc, results='asis', eval=TRUE, cache=TRUE, dependson='initial-se-object'}
+filtered_data_tables <- print_data(
+  se_list$main,
+  config$output_paths$differential_expression$filtered_data,
+  show_first_n_rows = 100,
+  print_tables = FALSE
+)
+```
+
+## Quality control on Filtered Data {.tabset}
+
+```{r filtered-data-qc-plots, results='asis', eval=TRUE, cache=TRUE, dependson='initial-se-object'}
+qc(no_outlier_data, config, out_dir = config$output_paths$differential_expression$qc, path_prefix = "filtered")
+pca(no_outlier_data, config, out_dir = config$output_paths$differential_expression$qc, path_prefix = "filtered")
+```
+
+# Contrast Definitions (USER‑CONFIGURABLE)
+
+**What you must know about your dataset:**
+1. The **group column** in your sample table (here called `Group`).
+2. Your **disease level** and **control level** within that group column.
+3. Any **covariates** you want to adjust for (here `Cov1` continuous and `Cov2`
+   categorical).
+
+> The shipped test data uses `Group = disease/control`, `Cov1` (continuous),
+> and `Cov2` (binary). Rename these in your own sample table or edit the code
+> below to match your column names.
+
+```{r build-contrasts-parameters, results='asis', eval=TRUE, cache=TRUE, dependson='initial-se-object'}
+
+# -------------------------------------------------------------------------
+# USER SETTINGS edit this entire chunk for your own data
+# -------------------------------------------------------------------------
+group_col      <- "Group"         # column in sampletable that defines groups
+disease_level  <- "disease"       # disease level name
+control_level  <- "control"       # control level name
+
+cov_continuous <- "Cov1"          # continuous covariate (will be centered)
+cov_factor     <- "Cov2"          # categorical covariate
+
+dependent_var  <- "NPX"           # assay column to model (NPX for PEA)
+
+alpha          <- config$alpha    # FDR threshold
+
+# -------------------------------------------------------------------------
+# 1) Subset to the samples needed for disease vs control
+# -------------------------------------------------------------------------
+# Keep only disease + control samples and mean‑center the continuous covariate.
+# center_numerics() appends "_c" to the centered covariate name.
+se_list$Disease <- subset_se(
+  se_list$main,
+  column         = group_col,
+  pattern        = paste0(disease_level, "|", control_level),
+  keep_or_remove = "keep"
+) %>%
+  center_numerics(cov_continuous)
+  # %>% add_PatientID; see add_PatientID from helpers.R to add a dependent sample identifier
+  # for lmer (linnear mixed effects) modeling
+
+# Pull the joined long data for easy editing
+df_long <- S4Vectors::metadata(se_list$Disease)$long_data
+
+# Ensure Group is a factor with disease first, then control
+df_long[[group_col]] <- factor(
+  df_long[[group_col]],
+  levels = c(disease_level, control_level)
+)
+
+# Ensure the categorical covariate is a factor (edit levels if you want ordering)
+df_long[[cov_factor]] <- factor(df_long[[cov_factor]])
+
+# Ensure SampleID is a factor for Error(SampleID) or lmer random intercepts
+df_long$SampleID <- factor(df_long$SampleID)
+
+# Save the modified long data back into the SE
+S4Vectors::metadata(se_list$Disease)$long_data <- df_long
+
+# Sync counts/metadata slots to the contrast‑specific subset
+se_list$Disease <- sync_se_to_metadata(se_list$Disease)
+
+# -------------------------------------------------------------------------
+# 2) Define model formulas
+# -------------------------------------------------------------------------
+cov_cont_c <- paste0(cov_continuous, "_c")
+formula_full_anova <- paste0(
+  dependent_var, " ~ ",
+  group_col, " * ", cov_cont_c, " + ",
+  cov_factor, " + Error(SampleID)"
+)
+
+# Use lmer when your data include repeated measurements from the same subject.
+# A linear mixed-effects model accounts for within-patient dependence by treating
+# each patient as a random effect. This is effectively equivalent to a paired
+# design when there are two draws per patient, but becomes essential when:
+#   1. patients have 3+ draws,
+#   2. or when a covariate (e.g., Age) varies across draws and must be modeled.
+#
+# To support this, helpers.R provides add_PatientID(), which converts SampleID
+# values like "patient_1a", "patient_1b" (where the trailing letter indicates
+# repeated measurements) into a shared PatientID ("patient_1") so lmer can group
+# observations correctly.
+formula_full_lmer <- paste0(
+  dependent_var, " ~ ",
+  group_col, " * ", cov_cont_c, " + ",
+  cov_factor, " + (1 | PatientID)"
+)
+# A simpler model without covariates. Helpful for sensitivity checking i.e., running
+# a contrast with and without covariates to see their impact on the results
+formula_group_only <- paste0(
+  dependent_var, " ~ ",
+  group_col, " + Error(SampleID)"
+)
+
+# -------------------------------------------------------------------------
+# 3) Build 7 *disease_vs_control* contrasts to showcase multiple test types
+# -------------------------------------------------------------------------
+# Each contrast reuses the SAME Disease SE object; only the statistical test differs.
+# Edit run_stats to choose what is executed.
+
+contrast_list <- list()
+
+contrast_list$disease_vs_control_anova <- validate_parameters(
+  list(
+    name               = "disease_vs_control_anova",
+    se_object_name     = "Disease",
+    sampletable_column = group_col,
+    factor             = TRUE,
+    treatment          = disease_level,
+    control            = control_level,
+    observed           = c(cov_factor, cov_cont_c),
+    formula            = formula_full_anova,
+    more_factors       = cov_factor,
+    # Specify a posthoc test using emmeans using the syntax list(Column = c(level_1 vs level_2))
+    # Here we are using variables to reprent string column names so we must use the setNames syntax to build the list.
+    emm                = setNames(list(c(disease_level, control_level)), group_col), # group_col ("Group" will be your main effect in the results table)
+    report_lfc         = TRUE,
+    alt_lfc_col        = NULL, # If you're main effect term is a continuous variable, set emm to NULL and optionally chose an alternative column to
+                               # use to report a L2FC value (Column must be a 2 level factor)
+    alpha              = alpha,
+    run_stats          = c("anova")
+  ),
+  se_list
+)
+
+contrast_list$disease_vs_control_lmer <- validate_parameters(
+  list(
+    name               = "disease_vs_control_lmer",
+    se_object_name     = "Disease",
+    sampletable_column = group_col,
+    factor             = TRUE,
+    treatment          = disease_level,
+    control            = control_level,
+    observed           = c(cov_factor, cov_cont_c),
+    formula            = formula_full_lmer,
+    more_factors       = cov_factor,
+    emm                = setNames(list(c(disease_level, control_level)), group_col),
+    report_lfc         = TRUE,
+    alpha              = alpha,
+    run_stats          = c("lmer")
+  ),
+  se_list
+)
+
+contrast_list$disease_vs_control_ttest <- validate_parameters(
+  list(
+    name               = "disease_vs_control_ttest",
+    se_object_name     = "Disease",
+    sampletable_column = group_col,
+    factor             = TRUE,
+    treatment          = disease_level,
+    control            = control_level,
+    # These NULL variables are only for ANOVA/lmer
+    observed           = NULL,
+    formula            = NULL,
+    more_factors       = NULL,
+    emm                = NULL,
+    report_lfc         = TRUE,
+    alpha              = alpha,
+    run_stats          = c("ttest")
+  ),
+  se_list
+)
+
+contrast_list$disease_vs_control_wilcox <- validate_parameters(
+  list(
+    name               = "disease_vs_control_wilcox",
+    se_object_name     = "Disease",
+    sampletable_column = group_col,
+    factor             = TRUE,
+    treatment          = disease_level,
+    control            = control_level,
+    observed           = NULL,
+    formula            = NULL,
+    more_factors       = NULL,
+    emm                = NULL,
+    report_lfc         = TRUE,
+    alpha              = alpha,
+    run_stats          = c("wilcox")
+  ),
+  se_list
+)
+
+contrast_list$disease_vs_control_kw <- validate_parameters(
+  list(
+    name               = "disease_vs_control_kw",
+    se_object_name     = "Disease",
+    sampletable_column = group_col,
+    factor             = TRUE,
+    treatment          = disease_level,
+    control            = control_level,
+    observed           = NULL,
+    formula            = NULL,
+    more_factors       = NULL,
+    emm                = NULL,
+    report_lfc         = TRUE,
+    alpha              = alpha,
+    run_stats          = c("nonparam"),
+    dependent          = FALSE    # FALSE => Kruskal–Wallis in kruskal_test()
+                                  # TRUE => Friedman
+  ),
+  se_list
+)
+```
+
+```{r test-contrasts, eval=TRUE, cache=TRUE, results='asis', dependson='build-contrasts-parameters'}
+# Subset the list of contrast configurations (contrast_list) to only disase_vs_control_anova
+# to improve workflow test run performace
+contrast_list <- contrast_list[1]
+# Feed the list of contrast configurations to their respective testing functions
+res_list <- parallel_test_runner(contrast_list, se_list, config)
+```
+
+```{r add-ens-geneids, eval=TRUE, cache=TRUE, dependson='test-contrasts'}
+# Our results only have Protein common names, UniProt IDs and OlinkIDs at this
+# point so lets append ENSEMBL gene IDs so we can later annotate the data
+# using the ENSEMBL gene ID column as a common key.
+res_list <- append_geneid(res_list)
+```
+
+```{r subset-res-list, eval=TRUE, cache=TRUE, dependson='test-contrasts'}
+# ANOVA results report adjusted p-values for each model term's effect.
+# To make plotting and downstream analyses easier, we'll subset the results
+# to include only the main effect of interest. (Disease for test data)
+res_list_subset_1_effect <- keep_primary_effects(res_list)
+num_significant <- report_num_significant(res_list_subset_1_effect)
+```
+
+## Contrast Designs
+
+All seven contrasts answer the same biological question—**disease vs control**—
+but using different statistical engines. This is useful for sensitivity checks and
+for demonstrating the toolkit on varied assumptions.
+
+---
+
+#### disease_vs_control model design
+
+**Biological question:** *How do disease samples differ from controls in NPX after adjusting for Cov1 and Cov2?*
+
+**Formula (Cov1 centered):**
+`NPX ~ Group * Cov1_c + Cov2 + Error(SampleID)`
+
+- **Group:** disease vs control (main effect)
+- **Group × Cov1_c:** Cov1‑dependent disease effect
+- **Cov1_c:** centered continuous covariate
+- **Cov2:** categorical covariate
+
+---
+
+# Sample-model Fit Assessment: Cook's Distance {.tabset}
+
+Cook’s distance is a summary of how much the entire fitted regression
+would change if you left that one observation (row) out. It blends:
+
+1. Leverage: how far the predictors for a sample sit from the center of the
+     contrasts design.
+2. Residual size: how large the model error is for that sample.
+
+Cook's distance is the change in the model coefficients as a result of the
+removal of a data point.
+
+Rows that are red across many columns flag samples that
+systematically influence hundreds of protein‐wise fits. These samples
+behavior is poorly explained by the model.
+
+```{r cooks-distance, results='asis', eval=TRUE}
+mdcat("### Cooks distance heatmap {.tabset}")
+plots <- parallel_assess_sample_fit_with_cooks(res_list_subset_1_effect, config)
+for (nm in names(plots)) {
+  mdcat(paste0("#### ", nm, "\n"))
+  subchunkify(plots[[nm]])
+}
+```
+
+# Results {.tabset}
+
+```{r print-results, results='asis', eval=TRUE, cache=FALSE, dependson='test-contrasts'}
+# Print results tables to the .HTML report, and export them to excel
+print_stats_results(
+  res_list,
+  res_list_subset_1_effect,
+  config$output_paths$differential_expression$results
+)
+```
+
+# Volcano Plots {.tabset}
+
+```{r volcano-plot, results='asis', eval=TRUE, cache=FALSE}
+# Print volcano plots to the .HTML report, and export them to .pdf
+volcano(res_list_subset_1_effect, se_list, config, out_dir = config$output_paths$differential_expression$plots)
+```
+
+# Boxplots {.tabset}
+
+```{r boxplot, results='asis', eval=TRUE, cache=FALSE}
+# Print boxplots to the .HTML repot, and export them to .pdf
+boxplot(res_list_subset_1_effect, config, out_dir = config$output_paths$differential_expression$plots)
+```
+
+# Concordance / Method Comparison {.tabset}
+
+For test data, rather than comparing different biological contrasts, we compare **methods** on
+the same biological question (disease vs control). Points near the diagonal
+indicate agreement in estimated effects. This chunk is disabled for test data.
+
+```{r concordance, results='asis', eval=FALSE, cache=FALSE, fig.height = 10, fig.width = 10}
+
+mdcat("### ANOVA vs Kruskal-Wallace (KW)")
+estimate_plot(
+  res_list_subset_1_effect, config,
+  out_dir = config$output_paths$differential_expression$plots,
+  contrasts = c("disease_vs_control_anova", "disease_vs_control_lmer"),
+  label_concord  = TRUE,
+  label_sig_both = FALSE,
+  plotly         = TRUE,
+  color          = "Threshold",
+  y.lim          = c(-2,2),
+  label_n        = 10
+)
+```
+
+# Upset Plots {.tabset}
+
+UpSet plots illustrate significant‑protein overlap **across contrasts (methods for test data)**.
+
+```{r upset, results='asis', eval=TRUE, cache=FALSE, dependson=c('test-contrasts', 'subset-res-list')}
+# Print upset plots to the .HTML report and export .pdf versions
+upset(res_list_subset_1_effect, config, out_dir = config$output_paths$differential_expression$upset)
+```
+
+```{r export-all-results, eval=TRUE}
+# All other .Rmd scripts in this directory depend on
+# the results of this DE analysis. Here is where the
+# data is exported from this analysis.
+saveRDS(
+  list(
+    res_list      = res_list,
+    se_list       = se_list,
+    contrast_list = contrast_list
+  ),
+  file = file.path(config$output_data_paths$PEA),
+  compress = FALSE
+)
+```
+
+## Session Information
+
+```{r sessioninfo, eval=TRUE}
+sessionInfo()
+```
