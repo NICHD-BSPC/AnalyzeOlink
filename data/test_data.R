@@ -30,8 +30,6 @@ pea_test_data_raw <- get("npx_data1")
 # SAFELY REDUCE DATASET TO 10 assays per panel (we have two panels)
 # ------------------------------------------------------------
 
-set.seed(123)
-
 # Number of assays to keep per panel
 assays_per_panel <- 10L
 
