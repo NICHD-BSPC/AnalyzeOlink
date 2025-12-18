@@ -1,7 +1,8 @@
 # Conda environemnt
 environment/env
-# Hidden snakemake directories
+# Snakemake files
 snakemake/.snakemake
+logs/
 # Data
 data/ELISA/
 data/PEA/
@@ -21,7 +22,7 @@ output/
 .Rproj.user/
 # RStudio files
 *.Rproj
-# Package check directory
+# Package installation check directory
 AnalyzeOlink.Rcheck/
 # Devtools build artifacts
 *.tar.gz
