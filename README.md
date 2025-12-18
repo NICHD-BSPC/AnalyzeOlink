@@ -106,7 +106,7 @@ Open the `.html` reports generated in the `rmds/` directory in a web browser. Ea
 
 ---
 
-## User Configuration (for your projects data)
+## User Configuration (for your project's data)
 
 To run the workflow on your own PEA/ELISA data, you must configure the pipeline in two locations.
 
